@@ -13,26 +13,56 @@ Run agent-browser + headless Chrome inside ephemeral Vercel Sandbox microVMs. A 
 pnpm add @vercel/sandbox
 ```
 
-The sandbox VM installs agent-browser and Chrome on first run. Use sandbox snapshots (below) to skip this step.
+The sandbox VM needs system dependencies for Chromium plus agent-browser itself. Use sandbox snapshots (below) to pre-install everything for sub-second startup.
 
 ## Core Pattern
 
 ```ts
 import { Sandbox } from "@vercel/sandbox";
 
+// System libraries required by Chromium on the sandbox VM (Amazon Linux / dnf)
+const CHROMIUM_SYSTEM_DEPS = [
+  "nss", "nspr", "libxkbcommon", "atk", "at-spi2-atk", "at-spi2-core",
+  "libXcomposite", "libXdamage", "libXrandr", "libXfixes", "libXcursor",
+  "libXi", "libXtst", "libXScrnSaver", "libXext", "mesa-libgbm", "libdrm",
+  "mesa-libGL", "mesa-libEGL", "cups-libs", "alsa-lib", "pango", "cairo",
+  "gtk3", "dbus-libs",
+];
+
+function getSandboxCredentials() {
+  if (
+    process.env.VERCEL_TOKEN &&
+    process.env.VERCEL_TEAM_ID &&
+    process.env.VERCEL_PROJECT_ID
+  ) {
+    return {
+      token: process.env.VERCEL_TOKEN,
+      teamId: process.env.VERCEL_TEAM_ID,
+      projectId: process.env.VERCEL_PROJECT_ID,
+    };
+  }
+  return {};
+}
+
 async function withBrowser<T>(
   fn: (sandbox: InstanceType<typeof Sandbox>) => Promise<T>,
 ): Promise<T> {
   const snapshotId = process.env.AGENT_BROWSER_SNAPSHOT_ID;
+  const credentials = getSandboxCredentials();
 
   const sandbox = snapshotId
     ? await Sandbox.create({
+        ...credentials,
         source: { type: "snapshot", snapshotId },
         timeout: 120_000,
       })
-    : await Sandbox.create({ runtime: "node24", timeout: 120_000 });
+    : await Sandbox.create({ ...credentials, runtime: "node24", timeout: 120_000 });
 
   if (!snapshotId) {
+    await sandbox.runCommand("sh", [
+      "-c",
+      `sudo dnf clean all 2>&1 && sudo dnf install -y --skip-broken ${CHROMIUM_SYSTEM_DEPS.join(" ")} 2>&1 && sudo ldconfig 2>&1`,
+    ]);
     await sandbox.runCommand("npm", ["install", "-g", "agent-browser"]);
     await sandbox.runCommand("npx", ["agent-browser", "install"]);
   }
@@ -47,6 +77,8 @@ async function withBrowser<T>(
 
 ## Screenshot
 
+The `screenshot --json` command saves to a file and returns the path. Read the file back as base64:
+
 ```ts
 export async function screenshotUrl(url: string) {
   return withBrowser(async (sandbox) => {
@@ -60,7 +92,9 @@ export async function screenshotUrl(url: string) {
     const ssResult = await sandbox.runCommand("agent-browser", [
       "screenshot", "--json",
     ]);
-    const screenshot = JSON.parse(await ssResult.stdout())?.data?.base64 || "";
+    const ssPath = JSON.parse(await ssResult.stdout())?.data?.path;
+    const b64Result = await sandbox.runCommand("base64", ["-w", "0", ssPath]);
+    const screenshot = (await b64Result.stdout()).trim();
 
     await sandbox.runCommand("agent-browser", ["close"]);
 
@@ -118,7 +152,9 @@ export async function fillAndSubmitForm(url: string, data: Record<string, string
     const ssResult = await sandbox.runCommand("agent-browser", [
       "screenshot", "--json",
     ]);
-    const screenshot = JSON.parse(await ssResult.stdout())?.data?.base64 || "";
+    const ssPath = JSON.parse(await ssResult.stdout())?.data?.path;
+    const b64Result = await sandbox.runCommand("base64", ["-w", "0", ssPath]);
+    const screenshot = (await b64Result.stdout()).trim();
 
     await sandbox.runCommand("agent-browser", ["close"]);
 
@@ -129,16 +165,26 @@ export async function fillAndSubmitForm(url: string, data: Record<string, string
 
 ## Sandbox Snapshots (Fast Startup)
 
-A **sandbox snapshot** is a saved VM image of a Vercel Sandbox with agent-browser + Chromium already installed. Think of it like a Docker image -- instead of installing dependencies from scratch every time, the sandbox boots from the pre-built image.
+A **sandbox snapshot** is a saved VM image of a Vercel Sandbox with system dependencies + agent-browser + Chromium already installed. Think of it like a Docker image -- instead of installing dependencies from scratch every time, the sandbox boots from the pre-built image.
 
 This is unrelated to agent-browser's *accessibility snapshot* feature (`agent-browser snapshot`), which dumps a page's accessibility tree. A sandbox snapshot is a Vercel infrastructure concept for fast VM startup.
 
-Without a sandbox snapshot, each run installs agent-browser + Chromium (~30s). With one, startup is sub-second.
+Without a sandbox snapshot, each run installs system deps + agent-browser + Chromium (~30s). With one, startup is sub-second.
 
 ### Creating a sandbox snapshot
 
+The snapshot must include system dependencies (via `dnf`), agent-browser, and Chromium:
+
 ```ts
 import { Sandbox } from "@vercel/sandbox";
+
+const CHROMIUM_SYSTEM_DEPS = [
+  "nss", "nspr", "libxkbcommon", "atk", "at-spi2-atk", "at-spi2-core",
+  "libXcomposite", "libXdamage", "libXrandr", "libXfixes", "libXcursor",
+  "libXi", "libXtst", "libXScrnSaver", "libXext", "mesa-libgbm", "libdrm",
+  "mesa-libGL", "mesa-libEGL", "cups-libs", "alsa-lib", "pango", "cairo",
+  "gtk3", "dbus-libs",
+];
 
 async function createSnapshot(): Promise<string> {
   const sandbox = await Sandbox.create({
@@ -146,6 +192,10 @@ async function createSnapshot(): Promise<string> {
     timeout: 300_000,
   });
 
+  await sandbox.runCommand("sh", [
+    "-c",
+    `sudo dnf clean all 2>&1 && sudo dnf install -y --skip-broken ${CHROMIUM_SYSTEM_DEPS.join(" ")} 2>&1 && sudo ldconfig 2>&1`,
+  ]);
   await sandbox.runCommand("npm", ["install", "-g", "agent-browser"]);
   await sandbox.runCommand("npx", ["agent-browser", "install"]);
 
@@ -167,6 +217,18 @@ npx tsx examples/environments/scripts/create-snapshot.ts
 ```
 
 Recommended for any production deployment using the Sandbox pattern.
+
+## Authentication
+
+On Vercel deployments, the Sandbox SDK authenticates automatically via OIDC. For local development or explicit control, set:
+
+```bash
+VERCEL_TOKEN=<personal-access-token>
+VERCEL_TEAM_ID=<team-id>
+VERCEL_PROJECT_ID=<project-id>
+```
+
+These are spread into `Sandbox.create()` calls. When absent, the SDK falls back to `VERCEL_OIDC_TOKEN` (automatic on Vercel).
 
 ## Scheduled Workflows (Cron)
 
@@ -197,8 +259,9 @@ export async function GET() {
 | Variable | Required | Description |
 |---|---|---|
 | `AGENT_BROWSER_SNAPSHOT_ID` | No (but recommended) | Pre-built sandbox snapshot ID for sub-second startup (see above) |
-
-The Vercel Sandbox SDK handles OIDC authentication automatically when deployed on Vercel. For local development, run `vercel link` and `vercel env pull` to get the required tokens.
+| `VERCEL_TOKEN` | No | Vercel personal access token (for local dev; OIDC is automatic on Vercel) |
+| `VERCEL_TEAM_ID` | No | Vercel team ID (for local dev) |
+| `VERCEL_PROJECT_ID` | No | Vercel project ID (for local dev) |
 
 ## Framework Examples
 
@@ -214,4 +277,4 @@ The pattern works identically across frameworks. The only difference is where yo
 
 ## Example
 
-See `examples/environments/` in the agent-browser repo for a working app with the Vercel Sandbox pattern, including a sandbox snapshot creation script and demo UI.
+See `examples/environments/` in the agent-browser repo for a working app with the Vercel Sandbox pattern, including a sandbox snapshot creation script, streaming progress UI, and rate limiting.

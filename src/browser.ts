@@ -2523,9 +2523,11 @@ export class BrowserManager {
       );
       this.browser = null;
     } else if (this.kernelSessionId) {
-      await this.closeKernelSession(this.kernelSessionId, this.kernelApiKey ?? undefined).catch((error) => {
-        console.error('Failed to close Kernel session:', error);
-      });
+      await this.closeKernelSession(this.kernelSessionId, this.kernelApiKey ?? undefined).catch(
+        (error) => {
+          console.error('Failed to close Kernel session:', error);
+        }
+      );
       this.browser = null;
     } else if (this.cdpEndpoint !== null) {
       // CDP: only disconnect, don't close external app's pages
