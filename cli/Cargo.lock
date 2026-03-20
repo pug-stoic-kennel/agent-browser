@@ -60,6 +60,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "similar",
+ "socket2",
  "time",
  "tokio",
  "tokio-tungstenite",
